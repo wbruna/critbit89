@@ -28,9 +28,12 @@
  #include <stdint.h>
 #endif
 
+#define TYPE_LEAF 0
+#define TYPE_NODE 1
+#define TYPE_EMPTY -1
 
-typedef struct {
-	void *child[2];
+typedef struct cb_node_t {
+	cb_child_t child[2];
 	uint32_t byte;
 	uint8_t otherbits;
 } cb_node_t;
@@ -47,24 +50,23 @@ static void free_std(void *ptr, void *baton) {
 }
 
 /* Static helper functions */
-static void cbt_traverse_delete(cb_tree_t *tree, void *top)
+static void cbt_traverse_delete(cb_tree_t *tree, cb_child_t p)
 {
-	uint8_t *p = top;
-	if (1 & (intptr_t)p) {
-		cb_node_t *q = (void *)(p - 1);
+	if (p.type == TYPE_NODE) {
+		cb_node_t *q = p.ptr.node;
 		cbt_traverse_delete(tree, q->child[0]);
 		cbt_traverse_delete(tree, q->child[1]);
 		tree->free(q, tree->baton);
 	} else {
-		tree->free(p, tree->baton);
+		tree->free(p.ptr.leaf, tree->baton);
 	}
 }
 
-static int cbt_traverse_prefixed(uint8_t *top,
+static int cbt_traverse_prefixed(cb_child_t top,
 	int (*callback)(const char *, void *), void *baton)
 {
-	if (1 & (intptr_t)top) {
-		cb_node_t *q = (void *)(top - 1);
+	if (top.type == TYPE_NODE) {
+		cb_node_t *q = top.ptr.node;
 		int ret = 0;
 
 		ret = cbt_traverse_prefixed(q->child[0], callback, baton);
@@ -78,7 +80,7 @@ static int cbt_traverse_prefixed(uint8_t *top,
 		return 0;
 	}
 
-	return (callback)((const char *)top, baton);
+	return (callback)((const char *)top.ptr.leaf, baton);
 }
 
 
@@ -86,7 +88,8 @@ static int cbt_traverse_prefixed(uint8_t *top,
 cb_tree_t cb_tree_make()
 {
 	cb_tree_t tree;
-	tree.root = NULL;
+	tree.root.ptr.leaf = NULL;
+	tree.root.type = TYPE_EMPTY;
 	tree.malloc = &malloc_std;
 	tree.free = &free_std;
 	tree.baton = NULL;
@@ -96,16 +99,16 @@ cb_tree_t cb_tree_make()
 /*! Returns non-zero if tree contains str */
 int cb_tree_contains(cb_tree_t *tree, const char *str)
 {
-	const uint8_t *ubytes = (void *)str;
+	const uint8_t *ubytes = (const uint8_t *)str;
 	const size_t ulen = strlen(str);
-	uint8_t *p = tree->root;
+	cb_child_t p = tree->root;
 
-	if (p == NULL) {
+	if (p.type == TYPE_EMPTY) {
 		return 0;
 	}
 
-	while (1 & (intptr_t)p) {
-		cb_node_t *q = (void *)(p - 1);
+	while (p.type == TYPE_NODE) {
+		cb_node_t *q = p.ptr.node;
 		uint8_t c = 0;
 		int direction;
 
@@ -117,34 +120,35 @@ int cb_tree_contains(cb_tree_t *tree, const char *str)
 		p = q->child[direction];
 	}
 
-	return (strcmp(str, (const char *)p) == 0);
+	return (strcmp(str, (const char*)p.ptr.leaf) == 0);
 }
 
 /*! Inserts str into tree, returns 0 on success */
 int cb_tree_insert(cb_tree_t *tree, const char *str)
 {
-	const uint8_t *const ubytes = (void *)str;
+	const uint8_t *const ubytes = (const uint8_t *)str;
 	const size_t ulen = strlen(str);
-	uint8_t *p = tree->root;
+	cb_child_t p = tree->root;
 	uint8_t c, *x;
 	uint32_t newbyte;
 	uint32_t newotherbits;
 	int direction, newdirection;
 	cb_node_t *newnode;
-	void **wherep;
+	cb_child_t *wherep;
 
-	if (p == NULL) {
-		x = tree->malloc(ulen + 1, tree->baton);
+	if (p.type == TYPE_EMPTY) {
+		x = (uint8_t *)tree->malloc(ulen + 1, tree->baton);
 		if (x == NULL) {
 			return ENOMEM;
 		}
 		memcpy(x, str, ulen + 1);
-		tree->root = x;
+		tree->root.ptr.leaf = x;
+		tree->root.type = TYPE_LEAF;
 		return 0;
 	}
 
-	while (1 & (intptr_t)p) {
-		cb_node_t *q = (void *)(p - 1);
+	while (p.type == TYPE_NODE) {
+		cb_node_t *q = p.ptr.node;
 		c = 0;
 		if (q->byte < ulen) {
 			c = ubytes[q->byte];
@@ -155,14 +159,14 @@ int cb_tree_insert(cb_tree_t *tree, const char *str)
 	}
 
 	for (newbyte = 0; newbyte < ulen; ++newbyte) {
-		if (p[newbyte] != ubytes[newbyte]) {
-			newotherbits = p[newbyte] ^ ubytes[newbyte];
+		if (p.ptr.leaf[newbyte] != ubytes[newbyte]) {
+			newotherbits = p.ptr.leaf[newbyte] ^ ubytes[newbyte];
 			goto different_byte_found;
 		}
 	}
 
-	if (p[newbyte] != 0) {
-		newotherbits = p[newbyte];
+	if (p.ptr.leaf[newbyte] != 0) {
+		newotherbits = p.ptr.leaf[newbyte];
 		goto different_byte_found;
 	}
 	return 1;
@@ -172,15 +176,15 @@ different_byte_found:
 	newotherbits |= newotherbits >> 2;
 	newotherbits |= newotherbits >> 4;
 	newotherbits = (newotherbits & ~(newotherbits >> 1)) ^ 255;
-	c = p[newbyte];
+	c = p.ptr.leaf[newbyte];
 	newdirection = (1 + (newotherbits | c)) >> 8;
 
-	newnode = tree->malloc(sizeof(cb_node_t), tree->baton);
+	newnode = (cb_node_t *)tree->malloc(sizeof(cb_node_t), tree->baton);
 	if (newnode == NULL) {
 		return ENOMEM;
 	}
 
-	x = tree->malloc(ulen + 1, tree->baton);
+	x = (uint8_t *)tree->malloc(ulen + 1, tree->baton);
 	if (x == NULL) {
 		tree->free(newnode, tree->baton);
 		return ENOMEM;
@@ -189,18 +193,19 @@ different_byte_found:
 	memcpy(x, ubytes, ulen + 1);
 	newnode->byte = newbyte;
 	newnode->otherbits = newotherbits;
-	newnode->child[1 - newdirection] = x;
+	newnode->child[1 - newdirection].ptr.leaf = x;
+	newnode->child[1 - newdirection].type = TYPE_LEAF;
 
 	/* Insert into tree */
 	wherep = &tree->root;
 	for (;;) {
 		cb_node_t *q;
 		p = *wherep;
-		if (!(1 & (intptr_t)p)) {
+		if (p.type == TYPE_LEAF) {
 			break;
 		}
 
-		q = (void *)(p - 1);
+		q = p.ptr.node;
 		if (q->byte > newbyte) {
 			break;
 		}
@@ -217,29 +222,30 @@ different_byte_found:
 	}
 
 	newnode->child[newdirection] = *wherep;
-	*wherep = (void *)(1 + (char *)newnode);
+	wherep->ptr.node = newnode;
+	wherep->type = TYPE_NODE;
 	return 0;
 }
 
 /*! Deletes str from the tree, returns 0 on success */
 int cb_tree_delete(cb_tree_t *tree, const char *str)
 {
-	const uint8_t *ubytes = (void *)str;
+	const uint8_t *ubytes = (const uint8_t *)str;
 	const size_t ulen = strlen(str);
-	uint8_t *p = tree->root;
-	void **wherep = 0, **whereq = 0;
+	cb_child_t p = tree->root;
+	cb_child_t *wherep = 0, *whereq = 0;
 	cb_node_t *q = 0;
 	int direction = 0;
 
-	if (tree->root == NULL) {
+	if (tree->root.type == TYPE_EMPTY) {
 		return 1;
 	}
 	wherep = &tree->root;
 
-	while (1 & (intptr_t)p) {
+	while (p.type == TYPE_NODE) {
 		uint8_t c = 0;
 		whereq = wherep;
-		q = (void *)(p - 1);
+		q = p.ptr.node;
 
 		if (q->byte < ulen) {
 			c = ubytes[q->byte];
@@ -249,13 +255,14 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 		p = *wherep;
 	}
 
-	if (strcmp(str, (const char *)p) != 0) {
+	if (strcmp(str, (const char *)p.ptr.leaf) != 0) {
 		return 1;
 	}
-	tree->free(p, tree->baton);
+	tree->free(p.ptr.leaf, tree->baton);
 
 	if (!whereq) {
-		tree->root = NULL;
+		tree->root.type = TYPE_EMPTY;
+		tree->root.ptr.leaf = NULL;
 		return 0;
 	}
 
@@ -267,27 +274,27 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 /*! Clears the given tree */
 void cb_tree_clear(cb_tree_t *tree)
 {
-	if (tree->root) {
+	if (tree->root.type != TYPE_EMPTY) {
 		cbt_traverse_delete(tree, tree->root);
 	}
-	tree->root = NULL;
+	tree->root.type = TYPE_EMPTY;
 }
 
 /*! Calls callback for all strings in tree with the given prefix */
 int cb_tree_walk_prefixed(cb_tree_t *tree, const char *prefix,
 	int (*callback)(const char *, void *), void *baton)
 {
-	const uint8_t *ubytes = (void *)prefix;
+	const uint8_t *ubytes = (const uint8_t *)prefix;
 	const size_t ulen = strlen(prefix);
-	uint8_t *p = tree->root;
-	uint8_t *top = p;
+	cb_child_t p = tree->root;
+	cb_child_t top = p;
 
-	if (p == NULL) {
+	if (p.type == TYPE_EMPTY) {
 		return 0;
 	}
 
-	while (1 & (intptr_t)p) {
-		cb_node_t *q = (void *)(p - 1);
+	while (p.type == TYPE_NODE) {
+		cb_node_t *q = p.ptr.node;
 		uint8_t c = 0;
 		int direction;
 
@@ -302,7 +309,7 @@ int cb_tree_walk_prefixed(cb_tree_t *tree, const char *prefix,
 		}
 	}
 
-	if (strlen((const char *)p) < ulen || memcmp(p, prefix, ulen) != 0) {
+	if (strlen((const char *)p.ptr.leaf) < ulen || memcmp(p.ptr.leaf, prefix, ulen) != 0) {
 		/* No strings match */
 		return 0;
 	}

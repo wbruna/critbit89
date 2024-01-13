@@ -14,16 +14,14 @@ extern "C" {
 #endif
 
 typedef struct {
-	int type;
-	union {
-		struct cb_node_t *node;
-		unsigned char *leaf;
-	} ptr;
+	struct cb_node_t *node;
+	unsigned char *leaf;
 } cb_child_t;
 
 /*! Main data structure */
 typedef struct {
 	cb_child_t root;
+	int root_type;
 	void *(*malloc)(size_t size, void *baton);
 	void (*free)(void *ptr, void *baton);
 	void *baton; /*! Passed to malloc() and free() */

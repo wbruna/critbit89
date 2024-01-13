@@ -190,7 +190,8 @@ different_byte_found:
 	newotherbits |= newotherbits >> 1;
 	newotherbits |= newotherbits >> 2;
 	newotherbits |= newotherbits >> 4;
-	newotherbits = (newotherbits & ~(newotherbits >> 1)) ^ 255;
+	/* (set just the bits above msb) | (move msb out of the way) */
+	newotherbits = (newotherbits ^ 255) | (newotherbits >> 1);
 	c = leaf[newbyte];
 	newdirection = (1 + (newotherbits | c)) >> 8;
 

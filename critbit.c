@@ -50,37 +50,37 @@ static void free_std(void *ptr, void *baton) {
 }
 
 /* Static helper functions */
-static void cbt_traverse_delete(cb_tree_t *tree, cb_child_t p)
+static void cbt_traverse_delete(cb_tree_t *tree, cb_node_t *par, int dir)
 {
-	if (p.type == TYPE_NODE) {
-		cb_node_t *q = p.ptr.node;
-		cbt_traverse_delete(tree, q->child[0]);
-		cbt_traverse_delete(tree, q->child[1]);
+	if (par->child[dir].type == TYPE_NODE) {
+		cb_node_t *q = par->child[dir].ptr.node;
+		cbt_traverse_delete(tree, q, 0);
+		cbt_traverse_delete(tree, q, 1);
 		tree->free(q, tree->baton);
 	} else {
-		tree->free(p.ptr.leaf, tree->baton);
+		tree->free(par->child[dir].ptr.leaf, tree->baton);
 	}
 }
 
-static int cbt_traverse_prefixed(cb_child_t top,
+static int cbt_traverse_prefixed(cb_node_t * par, int dir,
 	int (*callback)(const char *, void *), void *baton)
 {
-	if (top.type == TYPE_NODE) {
-		cb_node_t *q = top.ptr.node;
+	if (par->child[dir].type == TYPE_NODE) {
+		cb_node_t *q = par->child[dir].ptr.node;
 		int ret = 0;
 
-		ret = cbt_traverse_prefixed(q->child[0], callback, baton);
+		ret = cbt_traverse_prefixed(q, 0, callback, baton);
 		if (ret != 0) {
 			return ret;
 		}
-		ret = cbt_traverse_prefixed(q->child[1], callback, baton);
+		ret = cbt_traverse_prefixed(q, 1, callback, baton);
 		if (ret != 0) {
 			return ret;
 		}
 		return 0;
 	}
 
-	return (callback)((const char *)top.ptr.leaf, baton);
+	return (callback)((const char *)par->child[dir].ptr.leaf, baton);
 }
 
 
@@ -101,26 +101,31 @@ int cb_tree_contains(cb_tree_t *tree, const char *str)
 {
 	const uint8_t *ubytes = (const uint8_t *)str;
 	const size_t ulen = strlen(str);
-	cb_child_t p = tree->root;
+	cb_node_t *p;
+	int direction;
+	cb_node_t sentinel;
 
-	if (p.type == TYPE_EMPTY) {
+	if (tree->root.type == TYPE_EMPTY) {
 		return 0;
 	}
 
-	while (p.type == TYPE_NODE) {
-		cb_node_t *q = p.ptr.node;
+	sentinel.child[0] = tree->root;
+	p = &sentinel;
+	direction = 0;
+
+	while (p->child[direction].type == TYPE_NODE) {
+		cb_node_t *q = p->child[direction].ptr.node;
 		uint8_t c = 0;
-		int direction;
 
 		if (q->byte < ulen) {
 			c = ubytes[q->byte];
 		}
 		direction = (1 + (q->otherbits | c)) >> 8;
 
-		p = q->child[direction];
+		p = q;
 	}
 
-	return (strcmp(str, (const char*)p.ptr.leaf) == 0);
+	return (strcmp(str, (const char*)p->child[direction].ptr.leaf) == 0);
 }
 
 /*! Inserts str into tree, returns 0 on success */
@@ -128,15 +133,16 @@ int cb_tree_insert(cb_tree_t *tree, const char *str)
 {
 	const uint8_t *const ubytes = (const uint8_t *)str;
 	const size_t ulen = strlen(str);
-	cb_child_t p = tree->root;
+	cb_node_t *p;
 	uint8_t c, *x;
+	const uint8_t *leaf;
 	uint32_t newbyte;
 	uint32_t newotherbits;
 	int direction, newdirection;
 	cb_node_t *newnode;
-	cb_child_t *wherep;
+	cb_node_t sentinel; /* used as a temporary sentinel */
 
-	if (p.type == TYPE_EMPTY) {
+	if (tree->root.type == TYPE_EMPTY) {
 		x = (uint8_t *)tree->malloc(ulen + 1, tree->baton);
 		if (x == NULL) {
 			return ENOMEM;
@@ -147,26 +153,32 @@ int cb_tree_insert(cb_tree_t *tree, const char *str)
 		return 0;
 	}
 
-	while (p.type == TYPE_NODE) {
-		cb_node_t *q = p.ptr.node;
+	sentinel.child[0] = tree->root;
+
+	p = &sentinel;
+	direction = 0;
+
+	while (p->child[direction].type == TYPE_NODE) {
+		cb_node_t *q = p->child[direction].ptr.node;
 		c = 0;
 		if (q->byte < ulen) {
 			c = ubytes[q->byte];
 		}
 		direction = (1 + (q->otherbits | c)) >> 8;
 
-		p = q->child[direction];
+		p = q;
 	}
 
+	leaf = p->child[direction].ptr.leaf;
 	for (newbyte = 0; newbyte < ulen; ++newbyte) {
-		if (p.ptr.leaf[newbyte] != ubytes[newbyte]) {
-			newotherbits = p.ptr.leaf[newbyte] ^ ubytes[newbyte];
+		if (leaf[newbyte] != ubytes[newbyte]) {
+			newotherbits = leaf[newbyte] ^ ubytes[newbyte];
 			goto different_byte_found;
 		}
 	}
 
-	if (p.ptr.leaf[newbyte] != 0) {
-		newotherbits = p.ptr.leaf[newbyte];
+	if (leaf[newbyte] != 0) {
+		newotherbits = leaf[newbyte];
 		goto different_byte_found;
 	}
 	return 1;
@@ -176,7 +188,7 @@ different_byte_found:
 	newotherbits |= newotherbits >> 2;
 	newotherbits |= newotherbits >> 4;
 	newotherbits = (newotherbits & ~(newotherbits >> 1)) ^ 255;
-	c = p.ptr.leaf[newbyte];
+	c = leaf[newbyte];
 	newdirection = (1 + (newotherbits | c)) >> 8;
 
 	newnode = (cb_node_t *)tree->malloc(sizeof(cb_node_t), tree->baton);
@@ -197,15 +209,16 @@ different_byte_found:
 	newnode->child[1 - newdirection].type = TYPE_LEAF;
 
 	/* Insert into tree */
-	wherep = &tree->root;
+	p = &sentinel;
+	direction = 0;
+
 	for (;;) {
 		cb_node_t *q;
-		p = *wherep;
-		if (p.type == TYPE_LEAF) {
+		if (p->child[direction].type == TYPE_LEAF) {
 			break;
 		}
 
-		q = p.ptr.node;
+		q = p->child[direction].ptr.node;
 		if (q->byte > newbyte) {
 			break;
 		}
@@ -218,12 +231,16 @@ different_byte_found:
 			c = ubytes[q->byte];
 		}
 		direction = (1 + (q->otherbits | c)) >> 8;
-		wherep = q->child + direction;
+		p = q;
 	}
 
-	newnode->child[newdirection] = *wherep;
-	wherep->ptr.node = newnode;
-	wherep->type = TYPE_NODE;
+	newnode->child[newdirection] = p->child[direction];
+	p->child[direction].ptr.node = newnode;
+	p->child[direction].type = TYPE_NODE;
+
+	/* the root node may have been modified by the insertion */
+	tree->root = sentinel.child[0];
+
 	return 0;
 }
 
@@ -232,50 +249,60 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 {
 	const uint8_t *ubytes = (const uint8_t *)str;
 	const size_t ulen = strlen(str);
-	cb_child_t p = tree->root;
-	cb_child_t *wherep = 0, *whereq = 0;
-	cb_node_t *q = 0;
-	int direction = 0;
+	cb_node_t *p;
+	cb_node_t *q;
+	int direction;
+	int pdirection;
+	cb_node_t sentinel; /* used as a temporary sentinel */
 
 	if (tree->root.type == TYPE_EMPTY) {
 		return 1;
 	}
-	wherep = &tree->root;
 
-	while (p.type == TYPE_NODE) {
+	sentinel.child[0] = tree->root;
+	p = NULL;
+	q = &sentinel;
+	pdirection = direction = 0;
+
+	while (q->child[direction].type == TYPE_NODE) {
 		uint8_t c = 0;
-		whereq = wherep;
-		q = p.ptr.node;
+		p = q;
+		pdirection = direction;
+		q = q->child[direction].ptr.node;
 
 		if (q->byte < ulen) {
 			c = ubytes[q->byte];
 		}
 		direction = (1 + (q->otherbits | c)) >> 8;
-		wherep = q->child + direction;
-		p = *wherep;
 	}
 
-	if (strcmp(str, (const char *)p.ptr.leaf) != 0) {
+	if (strcmp(str, (const char *)q->child[direction].ptr.leaf) != 0) {
 		return 1;
 	}
-	tree->free(p.ptr.leaf, tree->baton);
+	tree->free(q->child[direction].ptr.leaf, tree->baton);
 
-	if (!whereq) {
+	if (!p) {
 		tree->root.type = TYPE_EMPTY;
 		tree->root.ptr.leaf = NULL;
 		return 0;
 	}
 
-	*whereq = q->child[1 - direction];
+	p->child[pdirection] = q->child[1 - direction];
 	tree->free(q, tree->baton);
+
+	/* the root node may have been modified by the deletion */
+	tree->root = sentinel.child[0];
+
 	return 0;
 }
 
 /*! Clears the given tree */
 void cb_tree_clear(cb_tree_t *tree)
 {
-	if (tree->root.type != TYPE_EMPTY) {
-		cbt_traverse_delete(tree, tree->root);
+	cb_node_t sentinel;
+	sentinel.child[0] = tree->root;
+	if (sentinel.child[0].type != TYPE_EMPTY) {
+		cbt_traverse_delete(tree, &sentinel, 0);
 	}
 	tree->root.type = TYPE_EMPTY;
 }
@@ -286,33 +313,43 @@ int cb_tree_walk_prefixed(cb_tree_t *tree, const char *prefix,
 {
 	const uint8_t *ubytes = (const uint8_t *)prefix;
 	const size_t ulen = strlen(prefix);
-	cb_child_t p = tree->root;
-	cb_child_t top = p;
+	cb_node_t *p;
+	int direction;
+	cb_node_t *top;
+	int tdirection;
+	cb_node_t sentinel;
+	const char * leaf;
 
-	if (p.type == TYPE_EMPTY) {
+	if (tree->root.type == TYPE_EMPTY) {
 		return 0;
 	}
 
-	while (p.type == TYPE_NODE) {
-		cb_node_t *q = p.ptr.node;
+	sentinel.child[0] = tree->root;
+	top = p = &sentinel;
+	tdirection = direction = 0;
+
+	while (p->child[direction].type == TYPE_NODE) {
+		cb_node_t *q = p->child[direction].ptr.node;
 		uint8_t c = 0;
-		int direction;
 
 		if (q->byte < ulen) {
 			c = ubytes[q->byte];
+			direction = (1 + (q->otherbits | c)) >> 8;
+			top = q;
+			tdirection = direction;
 		}
-		direction = (1 + (q->otherbits | c)) >> 8;
+		else {
+			direction = 0;
+		}
 
-		p = q->child[direction];
-		if (q->byte < ulen) {
-			top = p;
-		}
+		p = q;
 	}
 
-	if (strlen((const char *)p.ptr.leaf) < ulen || memcmp(p.ptr.leaf, prefix, ulen) != 0) {
+	leaf = (const char *)p->child[direction].ptr.leaf;
+	if (strlen(leaf) < ulen || memcmp(leaf, prefix, ulen) != 0) {
 		/* No strings match */
 		return 0;
 	}
 
-	return cbt_traverse_prefixed(top, callback, baton);
+	return cbt_traverse_prefixed(top, tdirection, callback, baton);
 }

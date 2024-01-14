@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "critbit.h"
 
@@ -45,13 +46,14 @@ static const char *dict[] = {
 	"misencourage", "toparchia", "lurchingly", "apocatastasis"
 };
 
+#define dict_size (sizeof(dict) / sizeof(const char *))
+
 static int tnum = 0;
 
 
 /* Insertions */
 static void test_insert(cb_tree_t *tree)
 {
-	int dict_size = sizeof(dict) / sizeof(const char *);
 	int i;
 
 	for (i = 0; i < dict_size; i++) {
@@ -65,7 +67,6 @@ static void test_insert(cb_tree_t *tree)
 /* Insertion of duplicate element */
 static void test_insert_dup(cb_tree_t *tree)
 {
-	int dict_size = sizeof(dict) / sizeof(const char *);
 	int i;
 
 	for (i = 0; i < dict_size; i++) {
@@ -85,8 +86,8 @@ static void test_contains(cb_tree_t *tree)
 	char *in;
 	const char *notin = "not in tree";
 
-	in = malloc(strlen(dict[23])+1);
-	strcpy(in, dict[23]);
+	in = (char*)malloc(strlen(dict[23 % dict_size])+1);
+	strcpy(in, dict[23 % dict_size]);
 
 	if (cb_tree_contains(tree, in) != 1) {
 		fprintf(stderr, "Tree should contain '%s'\n", in);
@@ -127,7 +128,7 @@ static void test_complete(cb_tree_t *tree, int n)
 /* Deletion */
 static void test_delete(cb_tree_t *tree)
 {
-	if (cb_tree_delete(tree, dict[91]) != 0) {
+	if (cb_tree_delete(tree, dict[91 % dict_size]) != 0) {
 		fprintf(stderr, "Deletion failed\n");
 		abort();
 	}
@@ -140,7 +141,6 @@ static void test_delete(cb_tree_t *tree)
 /* Complete deletion */
 static void test_delete_all(cb_tree_t *tree)
 {
-	int dict_size = sizeof(dict) / sizeof(const char *);
 	int i;
 
 	for (i = 0; i < dict_size; i++) {
@@ -231,6 +231,53 @@ static void test_prefixes(cb_tree_t *tree)
 	}
 }
 
+#define TESTRANDOM_RANGE 4096
+#define TESTRANDOM_LOOPS 100
+
+char randombuf[TESTRANDOM_RANGE];
+
+static void test_random (cb_tree_t *tree, int seed)
+{
+	int i;
+	int complaints = 0;
+	srand(seed);
+	for (i = 0; i < TESTRANDOM_RANGE * TESTRANDOM_LOOPS; i++) {
+		char key[10];
+		int v = rand() % TESTRANDOM_RANGE;
+		sprintf(key, "%x", v);
+		if (randombuf[v]) {
+			/* key should be inside the tree */
+			if (!cb_tree_contains(tree, key)) {
+				fprintf(stderr, "Random test (seed=%d): Tree should contain '%s'\n", seed, key);
+				if (complaints++ < 10) abort();
+			}
+			if (cb_tree_delete(tree, key) != 0) {
+				fprintf(stderr, "Random test (seed=%d): Deletion of '%s' failed\n", seed, key);
+				if (complaints++ < 10) abort();
+			}
+			if (cb_tree_contains(tree, key)) {
+				fprintf(stderr, "Random test (seed=%d): Tree should not contain '%s'\n", seed, key);
+				if (complaints++ < 10) abort();
+			}
+			randombuf[v] = 0;
+		}
+		else {
+			if (cb_tree_contains(tree, key)) {
+				fprintf(stderr, "Random test (seed=%d): Tree should not contain '%s'\n", seed, key);
+				if (complaints++ < 10) abort();
+			}
+			if (cb_tree_insert(tree, key) != 0) {
+				fprintf(stderr, "Random test (seed=%d): Insertion of '%s' failed\n", seed, key);
+				if (complaints++ < 10) abort();
+			}
+			if (!cb_tree_contains(tree, key)) {
+				fprintf(stderr, "Random test (seed=%d): Tree should contain '%s'\n", seed, key);
+				if (complaints++ < 10) abort();
+			}
+			randombuf[v] = 1;
+		}
+	}
+}
 
 /* Program entry point */
 int main(int argc, char **argv)
@@ -241,7 +288,7 @@ int main(int argc, char **argv)
 	test_insert(&tree);
 
 	printf("%d ", ++tnum); fflush(stdout);
-	test_complete(&tree, sizeof(dict) / sizeof(const char *));
+	test_complete(&tree, dict_size);
 
 	printf("%d ", ++tnum); fflush(stdout);
 	test_insert_dup(&tree);
@@ -254,8 +301,9 @@ int main(int argc, char **argv)
 
 	printf("%d ", ++tnum); fflush(stdout);
 	cb_tree_clear(&tree);
+
 	test_insert(&tree);
-	test_complete(&tree, sizeof(dict) / sizeof(const char *));
+	test_complete(&tree, dict_size);
 
 	printf("%d ", ++tnum); fflush(stdout);
 	test_delete_all(&tree);
@@ -275,6 +323,28 @@ int main(int argc, char **argv)
 	test_prefixes(&tree);
 
 	cb_tree_clear(&tree);
+
+	if (argc > 1) {
+		int pr = 0;
+		const char * arg = argv[1];
+		int seed;
+		printf("%d ", ++tnum); fflush(stdout);
+		if (*arg == 'p') {
+			pr = 1;
+			arg++;
+		}
+		if (*arg == 0 || *arg == 'r') {
+			seed = (int) time(NULL);
+		}
+		else {
+			seed = atoi(argv[1]);
+		}
+		test_random(&tree, seed);
+		if (pr)
+			cb_tree_print(&tree);
+		cb_tree_clear(&tree);
+	}
+
 	printf("ok\n");
 	return 0;
 }

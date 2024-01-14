@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "critbit.h"
 
@@ -84,6 +85,51 @@ static int cbt_traverse_prefixed(cb_node_t * par, int dir,
 	return (callback)((const char *)par->child[dir].leaf, baton);
 }
 
+static int numbit(uint8_t mask)
+{
+	switch(mask) {
+		case (1<<0) ^255: return 7;
+		case (1<<1) ^255: return 6;
+		case (1<<2) ^255: return 5;
+		case (1<<3) ^255: return 4;
+		case (1<<4) ^255: return 3;
+		case (1<<5) ^255: return 2;
+		case (1<<6) ^255: return 1;
+		case (1<<7) ^255: return 0;
+	}
+	return -1;
+}
+
+#define MAX_PREFIX 200
+
+static void cbt_traverse_print(cb_tree_t *tree, cb_node_t *par, int dir, char* prefix)
+{
+	size_t lprefix = strlen(prefix);
+	if (par->type[dir] == TYPE_NODE) {
+		cb_node_t *q = par->child[dir].node;
+		printf("%s+-- %d %p %d %d\n", prefix, dir, (void*)q, (int)q->byte, numbit(q->otherbits));
+		if (lprefix < MAX_PREFIX - 5)
+			sprintf(prefix + lprefix, "%c   ", (dir || (!*prefix)) ? ' ' : '|');
+		cbt_traverse_print(tree, q, 0, prefix);
+		cbt_traverse_print(tree, q, 1, prefix);
+		prefix[lprefix] = 0;
+	}
+	else {
+		const char * leaf = (const char*)par->child[dir].leaf;
+		printf("%s+-- %d %p %s\n", prefix, dir, (void*)leaf, leaf ? leaf : "(nil)");
+	}
+}
+
+void cb_tree_print(cb_tree_t *tree)
+{
+	char prefix[MAX_PREFIX] = "";
+	cb_node_t sentinel;
+	sentinel.child[0] = tree->root;
+	sentinel.type[0] = tree->root_type;
+	puts("");
+	cbt_traverse_print(tree, &sentinel, 0, prefix);
+	puts("");
+}
 
 /*! Creates a new, empty critbit tree */
 cb_tree_t cb_tree_make()

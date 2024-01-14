@@ -46,6 +46,8 @@ extern void cb_tree_clear(cb_tree_t *tree);
 extern int cb_tree_walk_prefixed(cb_tree_t *tree, const char *prefix,
 	int (*callback)(const char *, void *), void *baton);
 
+/*! Prints tree nodes and leaves in ASCII art */
+extern void cb_tree_print(cb_tree_t *tree);
 
 #ifdef __cplusplus
 }

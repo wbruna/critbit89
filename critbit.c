@@ -10,6 +10,7 @@
  * which this assumption is false.
  */
 
+#include <assert.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
@@ -32,6 +33,7 @@
 #define TYPE_LEAF 0
 #define TYPE_NODE 1
 #define TYPE_EMPTY -1
+#define UNUSED_NODE 1
 
 typedef struct cb_node_t {
 	cb_child_t child[2];
@@ -58,9 +60,13 @@ static void cbt_traverse_delete(cb_tree_t *tree, cb_node_t *par, int dir)
 		cb_node_t *q = par->child[dir].node;
 		cbt_traverse_delete(tree, q, 0);
 		cbt_traverse_delete(tree, q, 1);
-		tree->free(q, tree->baton);
+		tree->free((char*)q, tree->baton);
 	} else {
-		tree->free(par->child[dir].leaf, tree->baton);
+		char *buffer = (char*)par->child[dir].leaf - sizeof(cb_node_t);
+		cb_node_t *q = (cb_node_t *)buffer;
+		if (q->otherbits == UNUSED_NODE) {
+			tree->free(buffer, tree->baton);
+		}
 	}
 }
 
@@ -183,6 +189,7 @@ int cb_tree_insert(cb_tree_t *tree, const char *str)
 	const size_t ulen = strlen(str);
 	cb_node_t *p;
 	uint8_t c, *x;
+	char * buffer;
 	const uint8_t *leaf;
 	uint32_t newbyte;
 	uint32_t newotherbits;
@@ -191,10 +198,14 @@ int cb_tree_insert(cb_tree_t *tree, const char *str)
 	cb_node_t sentinel;
 
 	if (tree->root_type == TYPE_EMPTY) {
-		x = (uint8_t *)tree->malloc(ulen + 1, tree->baton);
-		if (x == NULL) {
+		buffer = (char*)tree->malloc(sizeof (cb_node_t) + ulen + 1, tree->baton);
+		if (buffer == NULL) {
 			return ENOMEM;
 		}
+		p = (cb_node_t *) buffer;
+		memset(p, 0, sizeof *p);
+		p->otherbits = UNUSED_NODE;
+		x = (uint8_t *)(buffer + sizeof (cb_node_t));
 		memcpy(x, str, ulen + 1);
 		tree->root.leaf = x;
 		tree->root_type = TYPE_LEAF;
@@ -241,16 +252,12 @@ different_byte_found:
 	c = leaf[newbyte];
 	newdirection = (1 + (newotherbits | c)) >> 8;
 
-	newnode = (cb_node_t *)tree->malloc(sizeof(cb_node_t), tree->baton);
-	if (newnode == NULL) {
+	buffer = (char*) tree->malloc(sizeof(cb_node_t) + ulen + 1, tree->baton);
+	if (buffer == NULL) {
 		return ENOMEM;
 	}
-
-	x = (uint8_t *)tree->malloc(ulen + 1, tree->baton);
-	if (x == NULL) {
-		tree->free(newnode, tree->baton);
-		return ENOMEM;
-	}
+	newnode = (cb_node_t *) buffer;
+	x = (uint8_t *)(buffer + sizeof(cb_node_t));
 
 	memcpy(x, ubytes, ulen + 1);
 	newnode->byte = newbyte;
@@ -303,6 +310,8 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 	const size_t ulen = strlen(str);
 	cb_node_t *p;
 	cb_node_t *q;
+	cb_node_t *lnode;
+	char * buffer;
 	int direction;
 	int pdirection;
 	cb_node_t sentinel;
@@ -332,17 +341,53 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 	if (strcmp(str, (const char *)q->child[direction].leaf) != 0) {
 		return 1;
 	}
-	tree->free(q->child[direction].leaf, tree->baton);
 
-	if (!p) {
-		tree->root_type = TYPE_EMPTY;
-		tree->root.leaf = NULL;
-		return 0;
+	/* get the allocated buffer, and the node embedded in it */
+	buffer = (char*)q->child[direction].leaf - sizeof(cb_node_t);
+	lnode = (cb_node_t*)buffer;
+
+	/* XXX it may be safe to remove q from the tree at this point, before
+	searching for lnode among its ancestors? */
+
+	if (lnode == q || lnode->otherbits == UNUSED_NODE) {
+		/* the leaf node is, or will be, unused */
+		if (!p) {
+			sentinel.child[0].leaf = NULL;
+			sentinel.type[0] = TYPE_EMPTY;
+		}
+		else {
+			p->child[pdirection] = q->child[1 - direction];
+			p->type[pdirection] = q->type[1 - direction];
+			/* mark q as unused; it'll either be free'd, or become the unused node */
+			q->otherbits = UNUSED_NODE;
+		}
+	}
+	else {
+		/* The leaf node it still in use inside the tree, as one of our
+		ancestors: replace it with the removed node q.
+		See https://dotat.at/prog/qp/blog-2015-10-07.html for a detailed argument
+		about why the leaf node must always be an ancestor of the removed leaf. */
+		cb_node_t *t = &sentinel;
+		int tdirection = 0;
+		while (t->type[tdirection] == TYPE_NODE) {
+			uint8_t c = 0;
+			if (t->child[tdirection].node == lnode) {
+				p->child[pdirection] = q->child[1 - direction];
+				p->type[pdirection] = q->type[1 - direction];
+				*q = *lnode;
+				t->child[tdirection].node = q;
+				break;
+			}
+			t = t->child[tdirection].node;
+			if (t->byte < ulen) {
+				c = ubytes[t->byte];
+			}
+			tdirection = (1 + (t->otherbits | c)) >> 8;
+		}
+		assert (t->type[tdirection] == TYPE_NODE);
 	}
 
-	p->child[pdirection] = q->child[1 - direction];
-	p->type[pdirection] = q->type[1 - direction];
-	tree->free(q, tree->baton);
+	tree->free(buffer, tree->baton);
 
 	/* the root node may have been modified by the deletion */
 	tree->root = sentinel.child[0];

@@ -3,13 +3,6 @@
  * Written by Jonas Gehring <jonas@jgehring.net>
  */
 
-/*
- * The code makes the assumption that malloc returns pointers aligned at at
- * least a two-byte boundary. Since the C standard requires that malloc return
- * pointers that can store any type, there are no commonly-used toolchains for
- * which this assumption is false.
- */
-
 #include <assert.h>
 #include <errno.h>
 #include <string.h>
@@ -18,28 +11,29 @@
 
 #include "critbit.h"
 
-#ifdef _MSC_VER /* MSVC */
- typedef unsigned __int8 uint8_t;
- typedef unsigned __int32 uint32_t;
- #ifdef _WIN64
-  typedef signed __int64 intptr_t;
- #else
-  typedef _W64 signed int intptr_t;
- #endif
-#else /* Not MSVC */
- #include <stdint.h>
-#endif
+#define TYPE_LEAF 1
+#define TYPE_NODE 2
+#define TYPE_EMPTY 3
 
-#define TYPE_LEAF 0
-#define TYPE_NODE 1
-#define TYPE_EMPTY -1
+/*
+Prefix nodes have:
+- the prefix as the left child;
+- the subtree of keys that share this prefix on the right child;
+- a byte position equal to the prefix length;
+- the value 0xff for the bitmask.
+For keys longer than the prefix, this mask will always direct the search to
+proceed to the right child. Shorter keys will go to the left node, ending at
+the prefix leaf.
+*/
+#define PREFIX_MASK 0xff
+
 #define UNUSED_NODE 1
 
 typedef struct cb_node_t {
 	cb_child_t child[2];
-	uint32_t byte;
-	int8_t type[2];
-	uint8_t otherbits;
+	cb_keylen_t byte;
+	cb_byte_t type[2];
+	cb_byte_t otherbits;
 } cb_node_t;
 
 /* Standard memory allocation functions */
@@ -91,7 +85,7 @@ static int cbt_traverse_prefixed(cb_node_t * par, int dir,
 	return (callback)((const char *)par->child[dir].leaf, baton);
 }
 
-static int numbit(uint8_t mask)
+static int numbit(cb_byte_t mask)
 {
 	switch(mask) {
 		case (1<<0) ^255: return 7;
@@ -157,7 +151,7 @@ cb_tree_t cb_tree_make()
 /*! Returns non-zero if tree contains str */
 int cb_tree_contains(cb_tree_t *tree, const char *str)
 {
-	const uint8_t *ubytes = (const uint8_t *)str;
+	const cb_byte_t *ubytes = (const cb_byte_t *)str;
 	const size_t ulen = strlen(str);
 	cb_node_t *p;
 	int direction;
@@ -176,7 +170,7 @@ int cb_tree_contains(cb_tree_t *tree, const char *str)
 		p = p->child[direction].node;
 		direction = 0;
 		if (p->byte < ulen) {
-			uint8_t c = ubytes[p->byte];
+			cb_byte_t c = ubytes[p->byte];
 			direction = (1 + (p->otherbits | c)) >> 8;
 		}
 	}
@@ -185,31 +179,20 @@ int cb_tree_contains(cb_tree_t *tree, const char *str)
 }
 
 
-/*
-Prefix nodes have:
-- the prefix as the left child;
-- the subtree of keys that share this prefix on the right child;
-- a byte position equal to the prefix length;
-- the value 0xff for the bitmask.
-For keys longer than the prefix, this mask will always direct the search to
-proceed to the right child. Shorter keys will go to the left node, ending at
-the prefix leaf.
-*/
-#define PREFIX_MASK 0xff
 
 
 /*! Inserts str into tree, returns 0 on success */
 int cb_tree_insert(cb_tree_t *tree, const char *str)
 {
-	const uint8_t *const ubytes = (const uint8_t *)str;
+	const cb_byte_t *const ubytes = (const cb_byte_t *)str;
 	const size_t ulen = strlen(str);
 	cb_node_t *p;
-	uint8_t c, *x;
+	cb_byte_t c, *x;
 	char * buffer;
-	const uint8_t *leaf;
-	uint32_t llen, clen;
-	uint32_t newbyte;
-	uint32_t newotherbits;
+	const cb_byte_t *leaf;
+	cb_keylen_t llen, clen;
+	cb_keylen_t newbyte;
+	cb_keylen_t newotherbits;
 	int direction, newdirection;
 	cb_node_t *newnode;
 	cb_node_t sentinel;
@@ -222,7 +205,7 @@ int cb_tree_insert(cb_tree_t *tree, const char *str)
 		p = (cb_node_t *) buffer;
 		memset(p, 0, sizeof *p);
 		p->otherbits = UNUSED_NODE;
-		x = (uint8_t *)(buffer + sizeof (cb_node_t));
+		x = (cb_byte_t *)(buffer + sizeof (cb_node_t));
 		memcpy(x, str, ulen + 1);
 		tree->root.leaf = x;
 		tree->root_type = TYPE_LEAF;
@@ -292,7 +275,7 @@ int cb_tree_insert(cb_tree_t *tree, const char *str)
 		return ENOMEM;
 	}
 	newnode = (cb_node_t *) buffer;
-	x = (uint8_t *)(buffer + sizeof(cb_node_t));
+	x = (cb_byte_t *)(buffer + sizeof(cb_node_t));
 
 	memcpy(x, ubytes, ulen + 1);
 	newnode->byte = newbyte;
@@ -345,7 +328,7 @@ int cb_tree_insert(cb_tree_t *tree, const char *str)
 /*! Deletes str from the tree, returns 0 on success */
 int cb_tree_delete(cb_tree_t *tree, const char *str)
 {
-	const uint8_t *ubytes = (const uint8_t *)str;
+	const cb_byte_t *ubytes = (const cb_byte_t *)str;
 	const size_t ulen = strlen(str);
 	cb_node_t *p;
 	cb_node_t *q;
@@ -372,7 +355,7 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 
 		direction = 0;
 		if (q->byte < ulen) {
-			uint8_t c = ubytes[q->byte];
+			cb_byte_t c = ubytes[q->byte];
 			direction = (1 + (q->otherbits | c)) >> 8;
 		}
 	}
@@ -416,7 +399,7 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 			t = t->child[tdirection].node;
 			tdirection = 0;
 			if (t->byte < ulen) {
-				uint8_t c = ubytes[t->byte];
+				cb_byte_t c = ubytes[t->byte];
 				tdirection = (1 + (t->otherbits | c)) >> 8;
 			}
 		}
@@ -448,7 +431,7 @@ void cb_tree_clear(cb_tree_t *tree)
 int cb_tree_walk_prefixed(cb_tree_t *tree, const char *prefix,
 	int (*callback)(const char *, void *), void *baton)
 {
-	const uint8_t *ubytes = (const uint8_t *)prefix;
+	const cb_byte_t *ubytes = (const cb_byte_t *)prefix;
 	const size_t ulen = strlen(prefix);
 	cb_node_t *p;
 	int direction;
@@ -471,7 +454,7 @@ int cb_tree_walk_prefixed(cb_tree_t *tree, const char *prefix,
 
 		direction = 0;
 		if (q->byte < ulen) {
-			uint8_t c = ubytes[q->byte];
+			cb_byte_t c = ubytes[q->byte];
 			direction = (1 + (q->otherbits | c)) >> 8;
 			top = q;
 			tdirection = direction;

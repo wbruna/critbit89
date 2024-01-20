@@ -113,7 +113,7 @@ static void cbt_traverse_print(cb_tree_t *tree, cb_node_t *par, int dir, char* p
 	size_t lprefix = strlen(prefix);
 	if (par->type[dir] == TYPE_NODE) {
 		cb_node_t *q = par->child[dir].node;
-		printf("%s+-- %d %p %d %d\n", prefix, dir, (void*)q, (int)q->byte, numbit(q->otherbits));
+		printf("%s+-- %d N off=%d bit=%d\n", prefix, dir, (int)q->byte, numbit(q->otherbits));
 		if (lprefix < MAX_PREFIX - 5)
 			sprintf(prefix + lprefix, "%c   ", (dir || (!*prefix)) ? ' ' : '|');
 		cbt_traverse_print(tree, q, 0, prefix);
@@ -122,7 +122,7 @@ static void cbt_traverse_print(cb_tree_t *tree, cb_node_t *par, int dir, char* p
 	}
 	else {
 		const char * leaf = (const char*)par->child[dir].leaf;
-		printf("%s+-- %d %p %s\n", prefix, dir, (void*)leaf, leaf ? leaf : "(nil)");
+		printf("%s+-- %d L \"%s\"\n", prefix, dir, leaf ? leaf : "(nil)");
 	}
 }
 
@@ -133,7 +133,12 @@ void cb_tree_print(cb_tree_t *tree)
 	sentinel.child[0] = tree->root;
 	sentinel.type[0] = tree->root_type;
 	puts("");
-	cbt_traverse_print(tree, &sentinel, 0, prefix);
+	if (tree->root_type == TYPE_EMPTY) {
+		puts("(empty tree)");
+	}
+	else {
+		cbt_traverse_print(tree, &sentinel, 0, prefix);
+	}
 	puts("");
 }
 

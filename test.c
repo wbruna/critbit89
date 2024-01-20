@@ -73,7 +73,7 @@ static void test_insert_dup(cb_tree_t *tree)
 		if (!cb_tree_contains(tree, dict[i])) {
 			continue;
 		}
-		if (cb_tree_insert(tree, dict[i]) != 1) {
+		if (cb_tree_insert(tree, dict[i]) == 0) {
 			fprintf(stderr, "Insertion of duplicate '%s' should fail\n", dict[i]);
 			abort();
 		}
@@ -239,7 +239,8 @@ char randombuf[TESTRANDOM_RANGE];
 static void test_random (cb_tree_t *tree, int seed)
 {
 	int i;
-	int complaints = 0;
+	int errors = 0;
+	int maxerrors = 5;
 	srand(seed);
 	for (i = 0; i < TESTRANDOM_RANGE * TESTRANDOM_LOOPS; i++) {
 		char key[10];
@@ -249,30 +250,30 @@ static void test_random (cb_tree_t *tree, int seed)
 			/* key should be inside the tree */
 			if (!cb_tree_contains(tree, key)) {
 				fprintf(stderr, "Random test (seed=%d): Tree should contain '%s'\n", seed, key);
-				if (complaints++ < 10) abort();
+				if (errors++ > maxerrors) abort();
 			}
 			if (cb_tree_delete(tree, key) != 0) {
 				fprintf(stderr, "Random test (seed=%d): Deletion of '%s' failed\n", seed, key);
-				if (complaints++ < 10) abort();
+				if (errors++ > maxerrors) abort();
 			}
 			if (cb_tree_contains(tree, key)) {
 				fprintf(stderr, "Random test (seed=%d): Tree should not contain '%s'\n", seed, key);
-				if (complaints++ < 10) abort();
+				if (errors++ > maxerrors) abort();
 			}
 			randombuf[v] = 0;
 		}
 		else {
 			if (cb_tree_contains(tree, key)) {
 				fprintf(stderr, "Random test (seed=%d): Tree should not contain '%s'\n", seed, key);
-				if (complaints++ < 10) abort();
+				if (errors++ > maxerrors) abort();
 			}
 			if (cb_tree_insert(tree, key) != 0) {
 				fprintf(stderr, "Random test (seed=%d): Insertion of '%s' failed\n", seed, key);
-				if (complaints++ < 10) abort();
+				if (errors++ > maxerrors) abort();
 			}
 			if (!cb_tree_contains(tree, key)) {
 				fprintf(stderr, "Random test (seed=%d): Tree should contain '%s'\n", seed, key);
-				if (complaints++ < 10) abort();
+				if (errors++ > maxerrors) abort();
 			}
 			randombuf[v] = 1;
 		}

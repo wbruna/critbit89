@@ -3,6 +3,8 @@
 # Written by Jonas Gehring <jonas@jgehring.net>
 #
 
+.PHONY: tests
+
 CC = c89
 CFLAGS = -Wall -pedantic -g $(ADD_CFLAGS)
 LDFLAGS = $(ADD_LDFLAGS)
@@ -18,6 +20,9 @@ test.o: critbit.h Makefile
 
 .c.o:
 	$(CC) -c $(CFLAGS) $< -o $@
+
+tests: test
+	./test 0
 
 clean:
 	rm -f *.o *.gcda *.gcno test

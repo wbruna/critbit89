@@ -173,19 +173,30 @@ int cb_tree_contains(cb_tree_t *tree, const char *str)
 	direction = 0;
 
 	while (p->type[direction] == TYPE_NODE) {
-		cb_node_t *q = p->child[direction].node;
-		uint8_t c = 0;
-
-		if (q->byte < ulen) {
-			c = ubytes[q->byte];
+		p = p->child[direction].node;
+		direction = 0;
+		if (p->byte < ulen) {
+			uint8_t c = ubytes[p->byte];
+			direction = (1 + (p->otherbits | c)) >> 8;
 		}
-		direction = (1 + (q->otherbits | c)) >> 8;
-
-		p = q;
 	}
 
 	return (strcmp(str, (const char*)p->child[direction].leaf) == 0);
 }
+
+
+/*
+Prefix nodes have:
+- the prefix as the left child;
+- the subtree of keys that share this prefix on the right child;
+- a byte position equal to the prefix length;
+- the value 0xff for the bitmask.
+For keys longer than the prefix, this mask will always direct the search to
+proceed to the right child. Shorter keys will go to the left node, ending at
+the prefix leaf.
+*/
+#define PREFIX_MASK 0xff
+
 
 /*! Inserts str into tree, returns 0 on success */
 int cb_tree_insert(cb_tree_t *tree, const char *str)
@@ -196,6 +207,7 @@ int cb_tree_insert(cb_tree_t *tree, const char *str)
 	uint8_t c, *x;
 	char * buffer;
 	const uint8_t *leaf;
+	uint32_t llen, clen;
 	uint32_t newbyte;
 	uint32_t newotherbits;
 	int direction, newdirection;
@@ -224,38 +236,56 @@ int cb_tree_insert(cb_tree_t *tree, const char *str)
 	direction = 0;
 
 	while (p->type[direction] == TYPE_NODE) {
-		cb_node_t *q = p->child[direction].node;
-		c = 0;
-		if (q->byte < ulen) {
-			c = ubytes[q->byte];
+		p = p->child[direction].node;
+		direction = 0;
+		if (p->byte < ulen) {
+			c = ubytes[p->byte];
+			direction = (1 + (p->otherbits | c)) >> 8;
 		}
-		direction = (1 + (q->otherbits | c)) >> 8;
-
-		p = q;
 	}
 
 	leaf = p->child[direction].leaf;
-	for (newbyte = 0; newbyte < ulen; ++newbyte) {
+	llen = strlen((const char*)leaf);
+
+	/* compare the new key with the leaf */
+
+	if (llen < ulen) {
+		/* the leaf could be a prefix of the new key */
+		clen = llen;
+		newdirection = 0;
+		newotherbits = PREFIX_MASK;
+	}
+	else if (ulen < llen) {
+		/* the new key could be a prefix of the leaf */
+		clen = ulen;
+		newdirection = 1;
+		newotherbits = PREFIX_MASK;
+	}
+	else {
+		/* can't have prefixes */
+		clen = ulen;
+		/* newotherbits doubles as a "possibly equal" flag */
+		newotherbits = 0;
+	}
+
+	for (newbyte = 0; newbyte < clen; ++newbyte) {
 		if (leaf[newbyte] != ubytes[newbyte]) {
 			newotherbits = leaf[newbyte] ^ ubytes[newbyte];
-			goto different_byte_found;
+			/* different_byte_found */
+			newotherbits |= newotherbits >> 1;
+			newotherbits |= newotherbits >> 2;
+			newotherbits |= newotherbits >> 4;
+			/* (set just the bits above msb) | (move msb out of the way) */
+			newotherbits = (newotherbits ^ 255) | (newotherbits >> 1);
+			c = leaf[newbyte];
+			newdirection = (1 + (newotherbits | c)) >> 8;
+			break;
 		}
 	}
 
-	if (leaf[newbyte] != 0) {
-		newotherbits = leaf[newbyte];
-		goto different_byte_found;
+	if (newbyte == clen && newotherbits == 0) {
+		return 1;
 	}
-	return 1;
-
-different_byte_found:
-	newotherbits |= newotherbits >> 1;
-	newotherbits |= newotherbits >> 2;
-	newotherbits |= newotherbits >> 4;
-	/* (set just the bits above msb) | (move msb out of the way) */
-	newotherbits = (newotherbits ^ 255) | (newotherbits >> 1);
-	c = leaf[newbyte];
-	newdirection = (1 + (newotherbits | c)) >> 8;
 
 	buffer = (char*) tree->malloc(sizeof(cb_node_t) + ulen + 1, tree->baton);
 	if (buffer == NULL) {
@@ -274,25 +304,29 @@ different_byte_found:
 	p = &sentinel;
 	direction = 0;
 
-	for (;;) {
-		cb_node_t *q;
-		if (p->type[direction] == TYPE_LEAF) {
-			break;
+	/* The prefix node mask shoud conceptually be lower than any other mask
+	value, since a prefix will come before any other byte comparison with
+	the same offset. However, its value is higher than any other mask.
+	The increment-and-mask changes it to zero, without affecting any other
+	comparison result. */
+	newotherbits = (newotherbits + 1) & 0xff;
+
+	while (p->type[direction] == TYPE_NODE) {
+		cb_node_t *q = p->child[direction].node;
+		if (q->byte >= newbyte) {
+			if (q->byte > newbyte) {
+				break;
+			}
+			else if (((q->otherbits + 1) & 0xff) > newotherbits) {
+				break;
+			}
 		}
 
-		q = p->child[direction].node;
-		if (q->byte > newbyte) {
-			break;
-		}
-		if (q->byte == newbyte && q->otherbits > newotherbits) {
-			break;
-		}
-
-		c = 0;
+		direction = 0;
 		if (q->byte < ulen) {
 			c = ubytes[q->byte];
+			direction = (1 + (q->otherbits | c)) >> 8;
 		}
-		direction = (1 + (q->otherbits | c)) >> 8;
 		p = q;
 	}
 
@@ -332,15 +366,15 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 	pdirection = direction = 0;
 
 	while (q->type[direction] == TYPE_NODE) {
-		uint8_t c = 0;
 		p = q;
 		pdirection = direction;
 		q = q->child[direction].node;
 
+		direction = 0;
 		if (q->byte < ulen) {
-			c = ubytes[q->byte];
+			uint8_t c = ubytes[q->byte];
+			direction = (1 + (q->otherbits | c)) >> 8;
 		}
-		direction = (1 + (q->otherbits | c)) >> 8;
 	}
 
 	if (strcmp(str, (const char *)q->child[direction].leaf) != 0) {
@@ -350,9 +384,6 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 	/* get the allocated buffer, and the node embedded in it */
 	buffer = (char*)q->child[direction].leaf - sizeof(cb_node_t);
 	lnode = (cb_node_t*)buffer;
-
-	/* XXX it may be safe to remove q from the tree at this point, before
-	searching for lnode among its ancestors? */
 
 	if (lnode == q || lnode->otherbits == UNUSED_NODE) {
 		/* the leaf node is, or will be, unused */
@@ -375,7 +406,6 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 		cb_node_t *t = &sentinel;
 		int tdirection = 0;
 		while (t->type[tdirection] == TYPE_NODE) {
-			uint8_t c = 0;
 			if (t->child[tdirection].node == lnode) {
 				p->child[pdirection] = q->child[1 - direction];
 				p->type[pdirection] = q->type[1 - direction];
@@ -384,10 +414,11 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 				break;
 			}
 			t = t->child[tdirection].node;
+			tdirection = 0;
 			if (t->byte < ulen) {
-				c = ubytes[t->byte];
+				uint8_t c = ubytes[t->byte];
+				tdirection = (1 + (t->otherbits | c)) >> 8;
 			}
-			tdirection = (1 + (t->otherbits | c)) >> 8;
 		}
 		assert (t->type[tdirection] == TYPE_NODE);
 	}
@@ -437,16 +468,13 @@ int cb_tree_walk_prefixed(cb_tree_t *tree, const char *prefix,
 
 	while (p->type[direction] == TYPE_NODE) {
 		cb_node_t *q = p->child[direction].node;
-		uint8_t c = 0;
 
+		direction = 0;
 		if (q->byte < ulen) {
-			c = ubytes[q->byte];
+			uint8_t c = ubytes[q->byte];
 			direction = (1 + (q->otherbits | c)) >> 8;
 			top = q;
 			tdirection = direction;
-		}
-		else {
-			direction = 0;
 		}
 
 		p = q;

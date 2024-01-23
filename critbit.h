@@ -7,29 +7,15 @@
 #ifndef CRITBIT_H_
 #define CRITBIT_H_
 
-#include <limits.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef unsigned char cb_byte_t;
-#if UINT_MAX > (1 << 16)
-  typedef unsigned int cb_keylen_t;
-#else
-  typedef unsigned long cb_keylen_t;
-#endif
-
-typedef struct {
-	struct cb_node_t *node;
-	cb_byte_t *leaf;
-} cb_child_t;
-
 /*! Main data structure */
 typedef struct {
-	cb_child_t root;
-	int root_type;
+	struct cb_node_t * root;
 	void *(*malloc)(size_t size, void *baton);
 	void (*free)(void *ptr, void *baton);
 	void *baton; /*! Passed to malloc() and free() */

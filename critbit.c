@@ -5,6 +5,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <limits.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -13,7 +14,6 @@
 
 #define TYPE_LEAF 1
 #define TYPE_NODE 2
-#define TYPE_EMPTY 3
 
 /*
 Prefix nodes have:
@@ -27,7 +27,25 @@ the prefix leaf.
 */
 #define PREFIX_MASK 0xff
 
-#define UNUSED_NODE 1
+/*
+The starting direction from the root node.
+The root node is actually a sentinel: it always has a single child, on a
+fixed direction, and the search starts one step ahead, only looking at the
+child and its type.
+*/
+#define ROOT_DIRECTION 1
+
+typedef unsigned char cb_byte_t;
+#if UINT_MAX > (1 << 16)
+  typedef unsigned int cb_keylen_t;
+#else
+  typedef unsigned long cb_keylen_t;
+#endif
+
+typedef struct {
+	struct cb_node_t *node;
+	cb_byte_t *leaf;
+} cb_child_t;
 
 typedef struct cb_node_t {
 	cb_child_t child[2];
@@ -55,12 +73,6 @@ static void cbt_traverse_delete(cb_tree_t *tree, cb_node_t *par, int dir)
 		cbt_traverse_delete(tree, q, 0);
 		cbt_traverse_delete(tree, q, 1);
 		tree->free((char*)q, tree->baton);
-	} else {
-		char *buffer = (char*)par->child[dir].leaf - sizeof(cb_node_t);
-		cb_node_t *q = (cb_node_t *)buffer;
-		if (q->otherbits == UNUSED_NODE) {
-			tree->free(buffer, tree->baton);
-		}
 	}
 }
 
@@ -123,15 +135,12 @@ static void cbt_traverse_print(cb_tree_t *tree, cb_node_t *par, int dir, char* p
 void cb_tree_print(cb_tree_t *tree)
 {
 	char prefix[MAX_PREFIX] = "";
-	cb_node_t sentinel;
-	sentinel.child[0] = tree->root;
-	sentinel.type[0] = tree->root_type;
 	puts("");
-	if (tree->root_type == TYPE_EMPTY) {
+	if (tree->root == NULL) {
 		puts("(empty tree)");
 	}
 	else {
-		cbt_traverse_print(tree, &sentinel, 0, prefix);
+		cbt_traverse_print(tree, tree->root, ROOT_DIRECTION, prefix);
 	}
 	puts("");
 }
@@ -140,8 +149,7 @@ void cb_tree_print(cb_tree_t *tree)
 cb_tree_t cb_tree_make()
 {
 	cb_tree_t tree;
-	tree.root.leaf = NULL;
-	tree.root_type = TYPE_EMPTY;
+	tree.root = NULL;
 	tree.malloc = &malloc_std;
 	tree.free = &free_std;
 	tree.baton = NULL;
@@ -158,18 +166,15 @@ static int cb_tree_contains_i(cb_tree_t *tree, const cb_byte_t *ubytes, cb_keyle
 {
 	cb_node_t *p;
 	int direction;
-	cb_node_t sentinel;
 	const cb_byte_t *leaf;
 	cb_keylen_t llen;
 
-	if (tree->root_type == TYPE_EMPTY) {
+	if (tree->root == NULL) {
 		return 0;
 	}
 
-	sentinel.child[0] = tree->root;
-	sentinel.type[0] = tree->root_type;
-	p = &sentinel;
-	direction = 0;
+	p = tree->root;
+	direction = ROOT_DIRECTION;
 
 	while (p->type[direction] == TYPE_NODE) {
 		p = p->child[direction].node;
@@ -201,21 +206,17 @@ static int cb_tree_insert_node(cb_tree_t *tree, cb_node_t *newnode, cb_byte_t *u
 	cb_keylen_t newbyte;
 	cb_keylen_t newotherbits;
 	int direction, newdirection;
-	cb_node_t sentinel;
 
-	if (tree->root_type == TYPE_EMPTY) {
+	if (tree->root == NULL) {
 		memset (newnode, 0, sizeof (*newnode));
-		newnode->otherbits = UNUSED_NODE;
-		tree->root.leaf = ubytes;
-		tree->root_type = TYPE_LEAF;
+		newnode->child[ROOT_DIRECTION].leaf = ubytes;
+		newnode->type[ROOT_DIRECTION] = TYPE_LEAF;
+		tree->root = newnode;
 		return 0;
 	}
 
-	sentinel.child[0] = tree->root;
-	sentinel.type[0] = tree->root_type;
-
-	p = &sentinel;
-	direction = 0;
+	p = tree->root;
+	direction = ROOT_DIRECTION;
 
 	while (p->type[direction] == TYPE_NODE) {
 		p = p->child[direction].node;
@@ -275,8 +276,8 @@ static int cb_tree_insert_node(cb_tree_t *tree, cb_node_t *newnode, cb_byte_t *u
 	newnode->type[1 - newdirection] = TYPE_LEAF;
 
 	/* Insert into tree */
-	p = &sentinel;
-	direction = 0;
+	p = tree->root;
+	direction = ROOT_DIRECTION;
 
 	/* The prefix node mask shoud conceptually be lower than any other mask
 	value, since a prefix will come before any other byte comparison with
@@ -308,10 +309,6 @@ static int cb_tree_insert_node(cb_tree_t *tree, cb_node_t *newnode, cb_byte_t *u
 	newnode->type[newdirection] = p->type[direction];
 	p->child[direction].node = newnode;
 	p->type[direction] = TYPE_NODE;
-
-	/* the root node may have been modified by the insertion */
-	tree->root = sentinel.child[0];
-	tree->root_type = sentinel.type[0];
 
 	return 0;
 }
@@ -350,19 +347,16 @@ static int cb_tree_delete_i(cb_tree_t *tree, const cb_byte_t *ubytes,
 	cb_node_t *lnode;
 	int direction;
 	int pdirection;
-	cb_node_t sentinel;
 	cb_byte_t *leaf;
 	cb_keylen_t llen;
 
-	if (tree->root_type == TYPE_EMPTY) {
+	if (tree->root == NULL) {
 		return 1;
 	}
 
-	sentinel.child[0] = tree->root;
-	sentinel.type[0] = tree->root_type;
 	p = NULL;
-	q = &sentinel;
-	pdirection = direction = 0;
+	q = tree->root;
+	pdirection = direction = ROOT_DIRECTION;
 
 	while (q->type[direction] == TYPE_NODE) {
 		p = q;
@@ -386,26 +380,27 @@ static int cb_tree_delete_i(cb_tree_t *tree, const cb_byte_t *ubytes,
 	/* get the node allocated together with this leaf */
 	lnode = (cb_node_t*) ((char*)leaf + offset_node_from_leaf);
 
-	if (lnode == q || lnode->otherbits == UNUSED_NODE) {
-		/* the leaf node is, or will be, unused */
-		if (!p) {
-			sentinel.child[0].leaf = NULL;
-			sentinel.type[0] = TYPE_EMPTY;
-		}
-		else {
-			p->child[pdirection] = q->child[1 - direction];
-			p->type[pdirection] = q->type[1 - direction];
-			/* mark q as unused; it'll either be free'd, or become the unused node */
-			q->otherbits = UNUSED_NODE;
-		}
+	if (p == NULL) {
+		tree->root = NULL;
+	}
+	else if (lnode == q) {
+		/* the leaf node will be unused */
+		p->child[pdirection] = q->child[1 - direction];
+		p->type[pdirection] = q->type[1 - direction];
+	}
+	else if (lnode == tree->root) {
+		p->child[pdirection] = q->child[1 - direction];
+		p->type[pdirection] = q->type[1 - direction];
+		*q = *lnode;
+		tree->root = q;
 	}
 	else {
 		/* The leaf node it still in use inside the tree, as one of our
 		ancestors: replace it with the removed node q.
 		See https://dotat.at/prog/qp/blog-2015-10-07.html for a detailed argument
 		about why the leaf node must always be an ancestor of the removed leaf. */
-		cb_node_t *t = &sentinel;
-		int tdirection = 0;
+		cb_node_t *t = tree->root;
+		int tdirection = ROOT_DIRECTION;
 		while (t->type[tdirection] == TYPE_NODE) {
 			if (t->child[tdirection].node == lnode) {
 				p->child[pdirection] = q->child[1 - direction];
@@ -423,10 +418,6 @@ static int cb_tree_delete_i(cb_tree_t *tree, const cb_byte_t *ubytes,
 		}
 		assert (t->type[tdirection] == TYPE_NODE);
 	}
-
-	/* the root node may have been modified by the deletion */
-	tree->root = sentinel.child[0];
-	tree->root_type = sentinel.type[0];
 
 	*deleted_leaf = leaf;
 	return 0;
@@ -453,13 +444,11 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 /*! Clears the given tree */
 void cb_tree_clear(cb_tree_t *tree)
 {
-	if (tree->root_type != TYPE_EMPTY) {
-		cb_node_t sentinel;
-		sentinel.child[0] = tree->root;
-		sentinel.type[0] = tree->root_type;
-		cbt_traverse_delete(tree, &sentinel, 0);
+	if (tree->root != NULL) {
+		cbt_traverse_delete(tree, tree->root, 0);
+		tree->free(tree->root, tree->baton);
 	}
-	tree->root_type = TYPE_EMPTY;
+	tree->root = NULL;
 }
 
 static int cb_tree_walk_prefixed_i(cb_tree_t *tree,
@@ -470,18 +459,15 @@ static int cb_tree_walk_prefixed_i(cb_tree_t *tree,
 	int direction;
 	cb_node_t *top;
 	int tdirection;
-	cb_node_t sentinel;
 	const cb_byte_t *leaf;
 	cb_keylen_t llen;
 
-	if (tree->root_type == TYPE_EMPTY) {
+	if (tree->root == NULL) {
 		return 0;
 	}
 
-	sentinel.child[0] = tree->root;
-	sentinel.type[0] = tree->root_type;
-	top = p = &sentinel;
-	tdirection = direction = 0;
+	top = p = tree->root;
+	tdirection = direction = ROOT_DIRECTION;
 
 	while (p->type[direction] == TYPE_NODE) {
 		cb_node_t *q = p->child[direction].node;

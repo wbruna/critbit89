@@ -228,10 +228,10 @@ static int cb_tree_insert_node(cb_tree_t *tree, cb_node_t *newnode, cb_byte_t *u
 	}
 
 	leaf = p->child[direction].leaf;
-	llen = strlen((const char*)leaf);
+	llen = cb_get_keylen(leaf);
 
-	/* compare the new key with the leaf */
-
+	/* compare the new key with the leaf: find the comparison length, and
+	default values for the new mask and direction */
 	if (llen < ulen) {
 		/* the leaf could be a prefix of the new key */
 		clen = llen;
@@ -245,9 +245,11 @@ static int cb_tree_insert_node(cb_tree_t *tree, cb_node_t *newnode, cb_byte_t *u
 		newotherbits = PREFIX_MASK;
 	}
 	else {
-		/* can't have prefixes */
+		/* the leaf and the new key could be identical */
 		clen = ulen;
-		/* newotherbits doubles as a "possibly equal" flag */
+		/* just to avoid a warning */
+		newdirection = 0;
+		/* newotherbits can't be zero, so it'll double as a flag for an existing key */
 		newotherbits = 0;
 	}
 
@@ -266,7 +268,7 @@ static int cb_tree_insert_node(cb_tree_t *tree, cb_node_t *newnode, cb_byte_t *u
 		}
 	}
 
-	if (newbyte == clen && newotherbits == 0) {
+	if (newotherbits == 0) {
 		return 1;
 	}
 

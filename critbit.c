@@ -65,7 +65,7 @@ static void cbt_traverse_delete(cb_tree_t *tree, cb_node_t *par, int dir)
 }
 
 static int cbt_traverse_prefixed(cb_node_t * par, int dir,
-	int (*callback)(const char *, void *), void *baton)
+	int (*callback)(const cb_byte_t*, void *), void *baton)
 {
 	if (par->type[dir] == TYPE_NODE) {
 		cb_node_t *q = par->child[dir].node;
@@ -82,7 +82,7 @@ static int cbt_traverse_prefixed(cb_node_t * par, int dir,
 		return 0;
 	}
 
-	return (callback)((const char *)par->child[dir].leaf, baton);
+	return (callback)(par->child[dir].leaf, baton);
 }
 
 static int numbit(cb_byte_t mask)
@@ -148,14 +148,19 @@ cb_tree_t cb_tree_make()
 	return tree;
 }
 
-/*! Returns non-zero if tree contains str */
-int cb_tree_contains(cb_tree_t *tree, const char *str)
+
+static cb_keylen_t cb_get_keylen(const cb_byte_t * key)
 {
-	const cb_byte_t *ubytes = (const cb_byte_t *)str;
-	const size_t ulen = strlen(str);
+	return strlen((const char*)key);
+}
+
+static int cb_tree_contains_i(cb_tree_t *tree, const cb_byte_t *ubytes, cb_keylen_t ulen)
+{
 	cb_node_t *p;
 	int direction;
 	cb_node_t sentinel;
+	const cb_byte_t *leaf;
+	cb_keylen_t llen;
 
 	if (tree->root_type == TYPE_EMPTY) {
 		return 0;
@@ -175,39 +180,33 @@ int cb_tree_contains(cb_tree_t *tree, const char *str)
 		}
 	}
 
-	return (strcmp(str, (const char*)p->child[direction].leaf) == 0);
+	leaf = p->child[direction].leaf;
+	llen = cb_get_keylen(leaf);
+	return (ulen == llen) && (memcmp(ubytes, leaf, ulen) == 0);
 }
 
-
-
-
-/*! Inserts str into tree, returns 0 on success */
-int cb_tree_insert(cb_tree_t *tree, const char *str)
+/*! Returns non-zero if tree contains str */
+int cb_tree_contains(cb_tree_t *tree, const char *str)
 {
-	const cb_byte_t *const ubytes = (const cb_byte_t *)str;
-	const size_t ulen = strlen(str);
+	return cb_tree_contains_i (tree, (const cb_byte_t *)str, strlen(str));
+}
+
+static int cb_tree_insert_node(cb_tree_t *tree, cb_node_t *newnode, cb_byte_t *ubytes)
+{
+	const cb_keylen_t ulen = cb_get_keylen(ubytes);
 	cb_node_t *p;
-	cb_byte_t c, *x;
-	char * buffer;
+	cb_byte_t c;
 	const cb_byte_t *leaf;
 	cb_keylen_t llen, clen;
 	cb_keylen_t newbyte;
 	cb_keylen_t newotherbits;
 	int direction, newdirection;
-	cb_node_t *newnode;
 	cb_node_t sentinel;
 
 	if (tree->root_type == TYPE_EMPTY) {
-		buffer = (char*)tree->malloc(sizeof (cb_node_t) + ulen + 1, tree->baton);
-		if (buffer == NULL) {
-			return ENOMEM;
-		}
-		p = (cb_node_t *) buffer;
-		memset(p, 0, sizeof *p);
-		p->otherbits = UNUSED_NODE;
-		x = (cb_byte_t *)(buffer + sizeof (cb_node_t));
-		memcpy(x, str, ulen + 1);
-		tree->root.leaf = x;
+		memset (newnode, 0, sizeof (*newnode));
+		newnode->otherbits = UNUSED_NODE;
+		tree->root.leaf = ubytes;
 		tree->root_type = TYPE_LEAF;
 		return 0;
 	}
@@ -270,17 +269,9 @@ int cb_tree_insert(cb_tree_t *tree, const char *str)
 		return 1;
 	}
 
-	buffer = (char*) tree->malloc(sizeof(cb_node_t) + ulen + 1, tree->baton);
-	if (buffer == NULL) {
-		return ENOMEM;
-	}
-	newnode = (cb_node_t *) buffer;
-	x = (cb_byte_t *)(buffer + sizeof(cb_node_t));
-
-	memcpy(x, ubytes, ulen + 1);
 	newnode->byte = newbyte;
 	newnode->otherbits = newotherbits;
-	newnode->child[1 - newdirection].leaf = x;
+	newnode->child[1 - newdirection].leaf = ubytes;
 	newnode->type[1 - newdirection] = TYPE_LEAF;
 
 	/* Insert into tree */
@@ -325,18 +316,43 @@ int cb_tree_insert(cb_tree_t *tree, const char *str)
 	return 0;
 }
 
-/*! Deletes str from the tree, returns 0 on success */
-int cb_tree_delete(cb_tree_t *tree, const char *str)
+/*! Inserts str into tree, returns 0 on success */
+int cb_tree_insert(cb_tree_t *tree, const char *str)
 {
-	const cb_byte_t *ubytes = (const cb_byte_t *)str;
 	const size_t ulen = strlen(str);
+	cb_byte_t *x;
+	char * buffer;
+	cb_node_t *newnode;
+	int res;
+
+	buffer = (char*)tree->malloc(sizeof (cb_node_t) + ulen + 1, tree->baton);
+	if (buffer == NULL) {
+		return ENOMEM;
+	}
+
+	newnode = (cb_node_t *) buffer;
+	x = (cb_byte_t *)(buffer + sizeof (cb_node_t));
+	memcpy(x, str, ulen + 1);
+	res = cb_tree_insert_node (tree, newnode, x);
+	if (res != 0) {
+		free(buffer);
+	}
+
+	return res;
+}
+
+static int cb_tree_delete_i(cb_tree_t *tree, const cb_byte_t *ubytes,
+  int offset_node_from_leaf, cb_byte_t ** deleted_leaf)
+{
+	const cb_keylen_t ulen = cb_get_keylen(ubytes);
 	cb_node_t *p;
 	cb_node_t *q;
 	cb_node_t *lnode;
-	char * buffer;
 	int direction;
 	int pdirection;
 	cb_node_t sentinel;
+	cb_byte_t *leaf;
+	cb_keylen_t llen;
 
 	if (tree->root_type == TYPE_EMPTY) {
 		return 1;
@@ -360,13 +376,15 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 		}
 	}
 
-	if (strcmp(str, (const char *)q->child[direction].leaf) != 0) {
+	leaf = q->child[direction].leaf;
+	llen = cb_get_keylen(leaf);
+
+	if (llen != ulen || memcmp(ubytes, leaf, ulen) != 0) {
 		return 1;
 	}
 
-	/* get the allocated buffer, and the node embedded in it */
-	buffer = (char*)q->child[direction].leaf - sizeof(cb_node_t);
-	lnode = (cb_node_t*)buffer;
+	/* get the node allocated together with this leaf */
+	lnode = (cb_node_t*) ((char*)leaf + offset_node_from_leaf);
 
 	if (lnode == q || lnode->otherbits == UNUSED_NODE) {
 		/* the leaf node is, or will be, unused */
@@ -406,13 +424,30 @@ int cb_tree_delete(cb_tree_t *tree, const char *str)
 		assert (t->type[tdirection] == TYPE_NODE);
 	}
 
-	tree->free(buffer, tree->baton);
-
 	/* the root node may have been modified by the deletion */
 	tree->root = sentinel.child[0];
 	tree->root_type = sentinel.type[0];
 
+	*deleted_leaf = leaf;
 	return 0;
+}
+
+/*! Deletes str from the tree, returns 0 on success */
+int cb_tree_delete(cb_tree_t *tree, const char *str)
+{
+	const cb_byte_t *ubytes = (const cb_byte_t *)str;
+	cb_byte_t *leaf;
+	int res;
+	int offset = -((int)sizeof(cb_node_t));
+
+	res = cb_tree_delete_i(tree, ubytes, offset, &leaf);
+
+	if (res == 0) {
+		char* buffer = (char*)leaf + offset;
+		free(buffer);
+	}
+
+	return res;
 }
 
 /*! Clears the given tree */
@@ -427,18 +462,17 @@ void cb_tree_clear(cb_tree_t *tree)
 	tree->root_type = TYPE_EMPTY;
 }
 
-/*! Calls callback for all strings in tree with the given prefix */
-int cb_tree_walk_prefixed(cb_tree_t *tree, const char *prefix,
-	int (*callback)(const char *, void *), void *baton)
+static int cb_tree_walk_prefixed_i(cb_tree_t *tree,
+	const cb_byte_t *prefix, cb_keylen_t prefixlen,
+	int (*callback)(const cb_byte_t *, void *), void *baton)
 {
-	const cb_byte_t *ubytes = (const cb_byte_t *)prefix;
-	const size_t ulen = strlen(prefix);
 	cb_node_t *p;
 	int direction;
 	cb_node_t *top;
 	int tdirection;
 	cb_node_t sentinel;
-	const char * leaf;
+	const cb_byte_t *leaf;
+	cb_keylen_t llen;
 
 	if (tree->root_type == TYPE_EMPTY) {
 		return 0;
@@ -453,8 +487,8 @@ int cb_tree_walk_prefixed(cb_tree_t *tree, const char *prefix,
 		cb_node_t *q = p->child[direction].node;
 
 		direction = 0;
-		if (q->byte < ulen) {
-			cb_byte_t c = ubytes[q->byte];
+		if (q->byte < prefixlen) {
+			cb_byte_t c = prefix[q->byte];
 			direction = (1 + (q->otherbits | c)) >> 8;
 			top = q;
 			tdirection = direction;
@@ -463,11 +497,35 @@ int cb_tree_walk_prefixed(cb_tree_t *tree, const char *prefix,
 		p = q;
 	}
 
-	leaf = (const char *)p->child[direction].leaf;
-	if (strlen(leaf) < ulen || memcmp(leaf, prefix, ulen) != 0) {
+	leaf = p->child[direction].leaf;
+	llen = cb_get_keylen(leaf);
+	if (llen < prefixlen || memcmp(leaf, prefix, prefixlen) != 0) {
 		/* No strings match */
 		return 0;
 	}
 
 	return cbt_traverse_prefixed(top, tdirection, callback, baton);
 }
+
+struct callback_str {
+	int (*callback)(const char *, void *);
+	void * baton;
+};
+
+static int callback_str_wrapper(const cb_byte_t * key, void * baton)
+{
+	struct callback_str *param = (struct callback_str *)baton;
+	return param->callback((const char*)key, param->baton);
+}
+
+/*! Calls callback for all strings in tree with the given prefix */
+int cb_tree_walk_prefixed(cb_tree_t *tree, const char *prefix,
+	int (*callback)(const char *, void *), void *baton)
+{
+	struct callback_str param;
+	param.callback = callback;
+	param.baton = baton;
+	return cb_tree_walk_prefixed_i(tree, (const cb_byte_t*)prefix,
+	  strlen(prefix), callback_str_wrapper, &param);
+}
+
